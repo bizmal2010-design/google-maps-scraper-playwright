@@ -10,4 +10,3 @@ An advanced automated tool designed to extract business leads and contact inform
 ## Sample Output
 Below is an example of the structured, cleaned data generated automatically by this tool:
 
-*(انظر الخطوة التالية لمعرفة كيف تضع صورتك هنا)*
