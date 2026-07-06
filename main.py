@@ -278,6 +278,7 @@ async def scrape_google_maps(search_query, total_results_needed=150):
         print(f"    With Phone         : {sum(1 for r in results if r['Phone'] != 'N/A')}")
         print(f"    With Website       : {sum(1 for r in results if r['Website'] != 'N/A')}")
         print(f"    With Reviews       : {sum(1 for r in results if r['Reviews'] != 'N/A')}")
+        print(f"    With Rating        : {sum(1 for r in results if r['Rating'] != 'N/A')}")
 
         if results:
             df = pd.DataFrame(results)
