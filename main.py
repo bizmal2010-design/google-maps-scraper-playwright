@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from urllib.parse import urlparse
 
 sys.stdout.reconfigure(encoding='utf-8')
-MAX_SCROLL_ATTEMPTS = 5
+MAX_SCROLL_ATTEMPTS = 6
 OUTPUT_DIR = "." 
 
 
@@ -23,7 +23,6 @@ def parse_rating_and_reviews(text):
         return rating, reviews
     
     text = text.strip().replace(",", "")
-    # Standard English maps format: "4.5 stars 120 reviews" or "4.5(120)"
     match = re.search(r"([\d.]+)\s*\(([\d]+)\)", text)
     if not match:
         match = re.search(r"([\d.]+)\s*stars?\s*([\d]+)", text, re.IGNORECASE)
@@ -35,12 +34,13 @@ def parse_rating_and_reviews(text):
 
 
 def clean_phone(raw):
-    # Cleans and formats UAE numbers to international format (+971)
-    digits = re.sub(r'[^\d]', '', raw)
+    digits = re.sub(r'[^\d+]', '', raw)
     if digits.startswith('971'):
         return '+' + digits
     elif digits.startswith('0'):
         return '+971' + digits[1:]
+    elif digits.startswith('+'):
+        return digits
     else:
         return '+971' + digits
     
@@ -55,7 +55,6 @@ def save_excel(results, filepath):
     ws = wb.active
     ws.title = "Dubai Medical Leads"
 
-    # Header style - English Professional
     header_font = Font(name='Arial', bold=True, color='FFFFFF', size=11)
     header_fill = PatternFill('solid', start_color='1F4E79')
     header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
@@ -87,42 +86,36 @@ def save_excel(results, filepath):
     for row_idx, item in enumerate(results, 2):
         row_fill = PatternFill('solid', start_color='EBF3FB') if row_idx % 2 == 0 else PatternFill('solid', start_color='FFFFFF')
 
-        # Numbering
         c = ws.cell(row=row_idx, column=1, value=row_idx - 1)
         c.font = normal_font
         c.alignment = center_align
         c.fill = row_fill
         c.border = thin_border
 
-        # Business Name
         c = ws.cell(row=row_idx, column=2, value=item['Business Name'])
         c.font = normal_font
         c.alignment = left_align
         c.fill = row_fill
         c.border = thin_border
 
-        # Phone
         c = ws.cell(row=row_idx, column=3, value=item['Phone'])
         c.font = normal_font
         c.alignment = center_align
         c.fill = row_fill
         c.border = thin_border
 
-        # Rating
         c = ws.cell(row=row_idx, column=4, value=item['Rating'])
         c.font = normal_font
         c.alignment = center_align
         c.fill = row_fill
         c.border = thin_border
 
-        # Reviews
         c = ws.cell(row=row_idx, column=5, value=item['Reviews'])
         c.font = normal_font
         c.alignment = center_align
         c.fill = row_fill
         c.border = thin_border
 
-        # Maps URL
         maps_url = item['Maps URL']
         if maps_url and maps_url != 'N/A':
             c = ws.cell(row=row_idx, column=6, value='Open Map')
@@ -135,7 +128,6 @@ def save_excel(results, filepath):
         c.fill = row_fill
         c.border = thin_border
 
-        # Website
         website = item['Website']
         if website and website != 'N/A':
             c = ws.cell(row=row_idx, column=7, value=short_url(website))
@@ -153,7 +145,7 @@ def save_excel(results, filepath):
     ws.freeze_panes = 'A2'
     wb.save(filepath)
 
-async def scrape_google_maps(search_query, total_results_needed=150):
+async def scrape_google_maps(search_query, total_results_needed=80):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -165,18 +157,15 @@ async def scrape_google_maps(search_query, total_results_needed=150):
         print(f"[*] Searching for: {search_query}")
         query = search_query.replace(" ", "+")
         
-        # --- Forced English UI (?hl=en) to match cloud proxies natively ---
         await page.goto(f"https://www.google.com/maps/search/{query}?hl=en")
         await page.wait_for_timeout(5000)
 
         results = []
         seen = set()
         scroll_attempts = 0
-        duplicate_count = 0
-        empty_name_count = 0
         last_cards_count = 0
 
-        print("[*] Progress: Collecting listings and reviews natively...")
+        print("[*] Progress: Extracting cards and navigating detail panels...")
 
         while len(results) < total_results_needed:
             if scroll_attempts >= MAX_SCROLL_ATTEMPTS:
@@ -184,60 +173,67 @@ async def scrape_google_maps(search_query, total_results_needed=150):
                 break
 
             cards = await page.query_selector_all('div[role="article"]')
-            new_cards = cards[last_cards_count:]
-            print(f"Cards found: {len(cards)} (+{len(new_cards)} new)")
+            new_cards_count = len(cards) - last_cards_count
+            print(f"Cards found: {len(cards)} (+{new_cards_count} new)")
+
+            if new_cards_count == 0 and len(cards) > 0:
+                scroll_attempts += 1
+            else:
+                scroll_attempts = 0
 
             for card in cards[last_cards_count:]:
                 if len(results) >= total_results_needed:
                     break
                 try:
-                    # Business Name
                     link_el = await card.query_selector("a.hfpxzc")
                     name = "N/A"
                     if link_el:
                         name = await link_el.get_attribute("aria-label")
                     
-                    if not name or name == "N/A":
-                        empty_name_count += 1
-                        continue
-                        
-                    if name in seen:
-                        duplicate_count += 1
+                    if not name or name == "N/A" or name in seen:
                         continue
 
                     if await card.query_selector('h1.kpih0e'):
                         continue
 
-                    # Rating & Reviews directly from English interface
                     rating = "N/A"
                     reviews = "N/A"
-                    
                     review_container = await card.query_selector('span.AJ76f')
                     if review_container:
                         raw_text = await review_container.get_attribute('aria-label')
                         rating, reviews = parse_rating_and_reviews(raw_text)
-                    else:
-                        stars_el = await card.query_selector('span.MW4etd')
-                        if stars_el:
-                            rating = (await stars_el.text_content()).strip()
-                        reviews_el = await card.query_selector('span.UY7F9')
-                        if reviews_el:
-                            reviews = (await reviews_el.text_content()).strip("()").strip()
 
-                    # URL
                     url = await link_el.get_attribute("href") if link_el else "N/A"
 
-                    # Phone
                     phone = "N/A"
-                    phone_el = await card.query_selector('span.UsdlK span[dir="ltr"]')
-                    if phone_el:
-                        phone = clean_phone(await phone_el.inner_text())
-
-                    # Website
                     website = "N/A"
-                    website_el = await card.query_selector('a.lcr4fd')
-                    if website_el:
-                        website = await website_el.get_attribute('href')
+                    
+                    if link_el:
+                        await link_el.click()
+                        # انتظر لوحة التفاصيل الجانبية لتتحمل بالكامل قبل القراءة لضمان البيانات
+                        await page.wait_for_timeout(1200) 
+
+                        # 1. جلب رقم الهاتف
+                        phone_button = await page.query_selector('button[data-item-id^="phone:tel:"]')
+                        if phone_button:
+                            phone_raw = await phone_button.get_attribute('data-item-id')
+                            phone = clean_phone(phone_raw.replace("phone:tel:", "").strip())
+                        
+                        if phone == "N/A":
+                            backup_phone = await page.query_selector('button[src*="phone"]')
+                            if backup_phone:
+                                phone = clean_phone(await backup_phone.inner_text())
+
+                        # 2. جلب الموقع الإلكتروني الاحترافي والمحدث من اللوحة الجانبية
+                        web_button = await page.query_selector('a[data-item-id="authority"]')
+                        if web_button:
+                            website = await web_button.get_attribute('href')
+                        
+                        if website == "N/A" or not website:
+                            # فلتر بديل يبحث عن أي رابط داخل اللوحة الجانبية يحتوي على وسم الموقع
+                            backup_web = await page.query_selector('a[aria-label*="Website:"], a[src*="public_gm_blue"]')
+                            if backup_web:
+                                website = await backup_web.get_attribute('href')
 
                     seen.add(name)
                     results.append({
@@ -248,53 +244,29 @@ async def scrape_google_maps(search_query, total_results_needed=150):
                         "Reviews": reviews,
                         "Website": website
                     })
-                    print(f"[+] {len(results)}. {name} | {phone} | Rating: {rating} | Reviews: {reviews}")
+                    print(f"[+] {len(results)}. {name} | Phone: {phone} | Website: {short_url(website)}")
                 except Exception as e:
-                    print("[!] Error inside card parser:", e)
+                    pass
             
             last_cards_count = len(cards)
-            current_cards = len(await page.query_selector_all('div[role="article"]'))
             feed = await page.query_selector('div[role="feed"]')
             if feed:
-                await feed.evaluate("(el) => el.scrollBy(0, 4000)")
-            await page.wait_for_timeout(2500)
-
-            try:
-                await page.wait_for_function(
-                    "(count) => document.querySelectorAll('div[role=\"article\"]').length > count",
-                    arg=current_cards,
-                    timeout=4000
-                )
-            except:
-                pass
-
-            new_cards_check = len(await page.query_selector_all('div[role=\"article\"]'))
-            if new_cards_check == current_cards:
-                scroll_attempts += 1
-            else:
-                scroll_attempts = 0
+                await feed.evaluate("(el) => el.scrollBy(0, 3500)")
+            await page.wait_for_timeout(2000)
 
         await browser.close()
 
-        # Save outputs
         csv_path = os.path.join(OUTPUT_DIR, "cleaned_medical_leads.csv")
         excel_path = os.path.join(OUTPUT_DIR, "cleaned_medical_leads.xlsx")
-
-        print("\n[*] Data Quality Report:")
-        print(f"    Cards loaded       : {current_cards}")
-        print(f"    Total records      : {len(results)}")
-        print(f"    With Phone         : {sum(1 for r in results if r['Phone'] != 'N/A')}")
-        print(f"    With Website       : {sum(1 for r in results if r['Website'] != 'N/A')}")
 
         if results:
             df = pd.DataFrame(results)
             df.to_csv(csv_path, index=False, encoding="utf-8-sig")
             save_excel(results, excel_path)
-            print(f"\n[+] Done successfully!")
-            print(f"[+] CSV saved to: {csv_path}")
-            print(f"[+] Excel saved to: {excel_path}")
+            print(f"\n[+] Extraction successfully completed!")
+            print(f"    Total Phones extracted : {sum(1 for r in results if r['Phone'] != 'N/A')}")
+            print(f"    Total Websites extracted : {sum(1 for r in results if r['Website'] != 'N/A')}")
         else:
             print("[!] No data collected.")
 
-# Targeted Query for High Demand Market (Dental Clinics in Dubai)
-asyncio.run(scrape_google_maps("Dental Clinics in Dubai", total_results_needed=150))
+asyncio.run(scrape_google_maps("Dental Clinics in Dubai", total_results_needed=80))
