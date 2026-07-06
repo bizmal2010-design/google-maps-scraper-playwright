@@ -15,102 +15,26 @@ sys.stdout.reconfigure(encoding='utf-8')
 MAX_SCROLL_ATTEMPTS = 6
 OUTPUT_DIR = "." 
 
-
 def parse_rating_and_reviews(text):
-    rating = "N/A"
-    reviews = "N/A"
-    if not text:
-        return rating, reviews
+    rating, reviews = "N/A", "N/A"
+    if not text: return rating, reviews
     
     text = text.strip().replace(",", "")
-    match = re.search(r"([\d.]+)\s*\(([\d]+)\)", text)
-    if not match:
-        match = re.search(r"([\d.]+)\s*stars?\s*([\d]+)", text, re.IGNORECASE)
-        
-    if match:
-        rating = match.group(1)
-        reviews = match.group(2)
-    return rating, reviews
-
-
-def clean_phone(raw):
-    digits = re.sub(r'[^\d+]', '', raw)
-    if digits.startswith('971'):
-        return '+' + digits
-    elif digits.startswith('0'):
-        return '+971' + digits[1:]
-    elif digits.startswith('+'):
-        return digits
+    
+    # التقاط التقييم (رقم يحتوي على فاصلة أو نقطة)
+    m_rating = re.search(r"(\d+[.,]\d+)", text)
+    if m_rating: 
+        rating = m_rating.group(1).replace(",", ".")
+    
+    # التقاط عدد المراجعات (بين أقواس، أو بجانب كلمة تعليق/مراجعة/review)
+    m_reviews_paren = re.search(r"\((\d+)\)", text)
+    if m_reviews_paren:
+        reviews = m_reviews_paren.group(1)
     else:
-        return '+971' + digits
-    
-def short_url(url):
-    if not url or url == "N/A":
-        return "N/A"
-    try:
-        return urlparse(url).netloc.replace("www.", "")
-    except:
-        return url
-
-def save_excel(results, filepath):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Dubai Medical Leads"
-
-    header_font = Font(name='Arial', bold=True, color='FFFFFF', size=11)
-    header_fill = PatternFill('solid', start_color='1F4E79')
-    header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
-
-    headers = ['#', 'Business Name', 'Phone', 'Rating', 'Reviews', 'Maps URL', 'Website']
-    col_widths = [5, 40, 20, 10, 10, 25, 30]
-
-    for col, (header, width) in enumerate(zip(headers, col_widths), 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_align
-        ws.column_dimensions[get_column_letter(col)].width = width
-
-    ws.row_dimensions[1].height = 30
-# -*- coding: utf-8 -*-
-
-import asyncio
-import sys
-import re
-import os
-import pandas as pd
-from playwright.async_api import async_playwright
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from urllib.parse import urlparse
-
-sys.stdout.reconfigure(encoding='utf-8')
-MAX_SCROLL_ATTEMPTS = 6
-OUTPUT_DIR = "." 
-
-def parse_rating_and_reviews(text):
-    rating = "N/A"
-    reviews = "N/A"
-    if not text:
-        return rating, reviews
-    
-    text = text.strip().replace(",", "")
-    # دعم اللغة العربية
-    r_ar1 = re.search(r"([\d.]+)\s*نجمة", text)
-    r_ar2 = re.search(r"([\d,]+)\s*مراجعة", text)
-    if r_ar1: rating = r_ar1.group(1)
-    if r_ar2: reviews = r_ar2.group(1)
-    if r_ar1 or r_ar2: return rating, reviews
-
-    # دعم اللغة الإنجليزية
-    match = re.search(r"([\d.]+)\s*\(([\d]+)\)", text)
-    if not match:
-        match = re.search(r"([\d.]+)\s*stars?\s*([\d]+)", text, re.IGNORECASE)
-        
-    if match:
-        rating = match.group(1)
-        reviews = match.group(2)
+        m_reviews_word = re.search(r"(\d+)\s*(?:تعليق|مراجعة|review)", text, re.IGNORECASE)
+        if m_reviews_word:
+            reviews = m_reviews_word.group(1)
+            
     return rating, reviews
 
 def clean_phone(raw):
@@ -204,7 +128,7 @@ async def scrape_google_maps(search_query, total_results_needed=80):
         scroll_attempts = 0
         last_cards_count = 0
 
-        print("[*] Progress: Extracting data (Dual-Layer Strategy)...")
+        print("[*] Progress: Extracting data with Deep Dynamic Waiting...")
 
         while len(results) < total_results_needed:
             if scroll_attempts >= MAX_SCROLL_ATTEMPTS:
@@ -223,11 +147,9 @@ async def scrape_google_maps(search_query, total_results_needed=80):
             for card in cards[last_cards_count:]:
                 if len(results) >= total_results_needed: break
                 try:
-                    # 1. استخراج العنوان (طريقتان كما طلبت)
                     name = "N/A"
                     link_el = await card.query_selector("a.hfpxzc")
-                    if link_el:
-                        name = await link_el.get_attribute("aria-label")
+                    if link_el: name = await link_el.get_attribute("aria-label")
                     
                     if not name or name == "N/A":
                         title_el = await card.query_selector("div.qBF1Pd")
@@ -238,45 +160,47 @@ async def scrape_google_maps(search_query, total_results_needed=80):
 
                     url = await link_el.get_attribute("href") if link_el else "N/A"
 
-                    # 2. استخراج التقييمات والمراجعات (طريقتان كما طلبت)
+                    # استخراج التقييمات والمراجعات بالخوارزمية الجديدة
                     rating, reviews = "N/A", "N/A"
-                    # الطريقة الأولى (aria-label)
                     stars_el = await card.query_selector('span.ZkP5Je, span[role="img"][aria-label*="star"], span[role="img"][aria-label*="نجمة"]')
                     if stars_el:
                         raw_text = await stars_el.get_attribute('aria-label')
                         if raw_text: rating, reviews = parse_rating_and_reviews(raw_text)
                     
-                    # الطريقة الثانية (الكلاسات المباشرة)
-                    if rating == "N/A":
+                    if rating == "N/A" or reviews == "N/A":
                         r_el = await card.query_selector('span.MW4etd')
                         rev_el = await card.query_selector('span.UY7F9')
-                        if r_el: rating = await r_el.inner_text()
-                        if rev_el: reviews = (await rev_el.inner_text()).strip('()')
+                        if r_el and rating == "N/A": rating = await r_el.inner_text()
+                        if rev_el and reviews == "N/A": reviews = (await rev_el.inner_text()).strip('()')
 
-                    # 3. استخراج الهاتف والموقع من الكرت الخارجي مباشرة (سريع)
+                    # استخراج مبدئي من الكرت
                     phone, website = "N/A", "N/A"
-                    
                     phone_el = await card.query_selector('span.UsdlK')
                     if phone_el: phone = clean_phone(await phone_el.inner_text())
 
                     web_el = await card.query_selector('a[data-value="Website"], a.lcr4fd')
                     if web_el: website = await web_el.get_attribute('href')
 
-                    # 4. الطبقة العميقة: إذا أخفت واجهة الصور الهاتف أو الموقع، ندخل للوحة الجانبية
+                    # الدخول المعمق في حال نقص البيانات
                     if (phone == "N/A" or website == "N/A") and link_el:
-                        await link_el.click()
+                        await link_el.scroll_into_view_if_needed() # إجبار المتصفح على رؤية الكرت
+                        await page.wait_for_timeout(300)
+                        await link_el.click(force=True)
                         
                         matched = False
-                        for _ in range(8):
+                        # رفع وقت الانتظار إلى 5 ثوانٍ (20 محاولة * 250ms) لمعالجة بطء سيرفر Apify
+                        for _ in range(20):
                             panel_title_el = await page.query_selector('h1.DUwDvf')
                             if panel_title_el:
                                 panel_title = await panel_title_el.inner_text()
-                                if name.strip() in panel_title.strip() or panel_title.strip() in name.strip():
+                                if name.strip().lower() in panel_title.strip().lower() or panel_title.strip().lower() in name.strip().lower():
                                     matched = True
                                     break
-                            await page.wait_for_timeout(200)
+                            await page.wait_for_timeout(250)
 
                         if matched:
+                            await page.wait_for_timeout(700) # مهلة إضافية لضمان ظهور الأزرار داخل اللوحة
+                            
                             if phone == "N/A":
                                 phone_button = await page.query_selector('button[data-item-id^="phone:tel:"]')
                                 if phone_button:
@@ -307,7 +231,7 @@ async def scrape_google_maps(search_query, total_results_needed=80):
             last_cards_count = len(cards)
             feed = await page.query_selector('div[role="feed"]')
             if feed: await feed.evaluate("(el) => el.scrollBy(0, 3500)")
-            await page.wait_for_timeout(2500)
+            await page.wait_for_timeout(3000) # إعطاء الخريطة وقت أطول للتحميل بعد التمرير
 
         await browser.close()
 
