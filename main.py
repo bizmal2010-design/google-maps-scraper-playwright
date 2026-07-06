@@ -13,22 +13,24 @@ from urllib.parse import urlparse
 
 sys.stdout.reconfigure(encoding='utf-8')
 MAX_SCROLL_ATTEMPTS = 5
-
-# --- [تعديل] حفظ الملف في مجلد السيرفر الحالي ليعمل على Apify ---
 OUTPUT_DIR = "." 
 
 
-def parse_aria(aria_text):
+def parse_rating_and_reviews(text):
+    """دالة ذكية لاستخراج التقييم وعدد المراجعات من النص المدمج في الكرت"""
     rating = "N/A"
     reviews = "N/A"
-    if not aria_text:
+    if not text:
         return rating, reviews
-    r1 = re.search(r"([\d.]+)\s*نجمة", aria_text)
-    r2 = re.search(r"([\d,]+)\s*مراجعة", aria_text)
-    if r1:
-        rating = r1.group(1)
-    if r2:
-        reviews = r2.group(1).replace(",", "")
+    
+    # تنظيف النص
+    text = text.strip().replace(",", "")
+    
+    # البحث عن نمط مثل: "4.5 (120)" أو "4.5(120)"
+    match = re.search(r"([\d.]+)\s*\(([\d]+)\)", text)
+    if match:
+        rating = match.group(1)
+        reviews = match.group(2)
     return rating, reviews
 
 
@@ -154,7 +156,6 @@ async def scrape_google_maps(search_query, total_results_needed=150):
         print(f"[*] Searching for: {search_query}")
         query = search_query.replace(" ", "+")
         
-        # --- [تعديل] استخدام رابط الخرائط الرسمي المباشر لضمان ثبات جلب البيانات ---
         await page.goto(f"https://www.google.com/maps/search/{query}?hl=ar")
         await page.wait_for_timeout(5000)
 
@@ -163,10 +164,9 @@ async def scrape_google_maps(search_query, total_results_needed=150):
         scroll_attempts = 0
         duplicate_count = 0
         empty_name_count = 0
-        rating_del_count = 0
         last_cards_count = 0
 
-        print("[*] Phase 1: Collecting listings...")
+        print("[*] Progress: Collecting listings and reviews all at once...")
 
         while len(results) < total_results_needed:
             if scroll_attempts >= MAX_SCROLL_ATTEMPTS:
@@ -181,7 +181,7 @@ async def scrape_google_maps(search_query, total_results_needed=150):
                 if len(results) >= total_results_needed:
                     break
                 try:
-                    # --- [تعديل هام] جلب الاسم من وسام الرابط الداخلي المحدث بدلاً من الأداة القديمة ---
+                    # استخراج الاسم
                     link_el = await card.query_selector("a.hfpxzc")
                     name = "N/A"
                     if link_el:
@@ -198,11 +198,23 @@ async def scrape_google_maps(search_query, total_results_needed=150):
                     if await card.query_selector('h1.kpih0e'):
                         continue
 
-                    # Rating
+                    # --- [تعديل التقييم والـ Reviews من الواجهة مباشرة] ---
                     rating = "N/A"
-                    rating_el = await card.query_selector('span.MW4etd')
-                    if rating_el:
-                        rating = (await rating_el.text_content()).strip()
+                    reviews = "N/A"
+                    
+                    # البحث عن الحاوية التي تحتوي على النجوم والتقييمات معاً في الكرت
+                    review_container = await card.query_selector('span.AJ76f')
+                    if review_container:
+                        raw_text = await review_container.get_attribute('aria-label')
+                        rating, reviews = parse_rating_and_reviews(raw_text)
+                    else:
+                        # محاولة بديلة إذا اختلف كلاس الحاوية
+                        stars_el = await card.query_selector('span.MW4etd')
+                        if stars_el:
+                            rating = (await stars_el.text_content()).strip()
+                        reviews_el = await card.query_selector('span.UY7F9')
+                        if reviews_el:
+                            reviews = (await reviews_el.text_content()).strip("()").strip()
 
                     # URL
                     url = await link_el.get_attribute("href") if link_el else "N/A"
@@ -225,10 +237,10 @@ async def scrape_google_maps(search_query, total_results_needed=150):
                         "Maps URL": url,
                         "Phone": phone,
                         "Rating": rating,
-                        "Reviews": "N/A",
+                        "Reviews": reviews, # أصبحت تُجلب فوراً
                         "Website": website
                     })
-                    print(f"[+] {len(results)}. {name} | {phone} | {rating}")
+                    print(f"[+] {len(results)}. {name} | {phone} | Rating: {rating} | Reviews: {reviews}")
                 except Exception as e:
                     print("[!] Error inside card parser:", e)
             
@@ -236,14 +248,14 @@ async def scrape_google_maps(search_query, total_results_needed=150):
             current_cards = len(await page.query_selector_all('div[role="article"]'))
             feed = await page.query_selector('div[role="feed"]')
             if feed:
-                await feed.evaluate("(el) => el.scrollBy(0, 3000)")
+                await feed.evaluate("(el) => el.scrollBy(0, 4000)")
             await page.wait_for_timeout(2500)
 
             try:
                 await page.wait_for_function(
                     "(count) => document.querySelectorAll('div[role=\"article\"]').length > count",
                     arg=current_cards,
-                    timeout=5000
+                    timeout=4000
                 )
             except:
                 pass
@@ -254,34 +266,9 @@ async def scrape_google_maps(search_query, total_results_needed=150):
             else:
                 scroll_attempts = 0
 
-        # ── PHASE 2: Reviews ──
-        print(f"\n[*] Phase 2: Fetching reviews for {len(results)} clinics...")
-        for index, item in enumerate(results):
-            if item['Maps URL'] == "N/A":
-                continue
-            try:
-                await page.goto(item['Maps URL'])
-                await page.wait_for_timeout(3000)
-
-                reviews_el = await page.query_selector('span.UY7F9')
-                if reviews_el:
-                    raw = await reviews_el.text_content()
-                    item['Reviews'] = raw.strip("()").strip()
-                else:
-                    aria_el = await page.query_selector('span.ZkP5Je')
-                    if aria_el:
-                        aria = await aria_el.get_attribute('aria-label')
-                        _, reviews = parse_aria(aria)
-                        item['Reviews'] = reviews
-
-                print(f"[+] {index+1}/{len(results)}. {item['Business Name']} → Reviews: {item['Reviews']}")
-            except Exception as e:
-                print(f"[!] Error fetching review: {e}")
-                continue
-
         await browser.close()
 
-        # ── PHASE 3: الحفظ داخل السيرفر ──
+        # ── حفظ النتائج ──
         csv_path = os.path.join(OUTPUT_DIR, "cleaned_medical_leads.csv")
         excel_path = os.path.join(OUTPUT_DIR, "cleaned_medical_leads.xlsx")
 
@@ -291,13 +278,12 @@ async def scrape_google_maps(search_query, total_results_needed=150):
         print(f"    With Phone         : {sum(1 for r in results if r['Phone'] != 'N/A')}")
         print(f"    With Website       : {sum(1 for r in results if r['Website'] != 'N/A')}")
         print(f"    With Reviews       : {sum(1 for r in results if r['Reviews'] != 'N/A')}")
-        print(f"    With Rating        : {sum(1 for r in results if r['Rating'] != 'N/A')}")
 
         if results:
             df = pd.DataFrame(results)
             df.to_csv(csv_path, index=False, encoding="utf-8-sig")
             save_excel(results, excel_path)
-            print(f"\n[+] Done successfully!")
+            print(f"\n[+] Done successfully in record time!")
             print(f"[+] CSV saved to: {csv_path}")
             print(f"[+] Excel saved to: {excel_path}")
         else:
