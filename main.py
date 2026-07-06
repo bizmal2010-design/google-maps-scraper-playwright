@@ -4,7 +4,6 @@ import asyncio
 import sys
 import re
 import os
-import subprocess
 import pandas as pd
 from playwright.async_api import async_playwright
 from openpyxl import Workbook
@@ -14,7 +13,9 @@ from urllib.parse import urlparse
 
 sys.stdout.reconfigure(encoding='utf-8')
 MAX_SCROLL_ATTEMPTS = 5
-OUTPUT_DIR = r"C:\Users\Khelil\Desktop\web"
+
+# --- [تعديل] حفظ الملف في مجلد السيرفر الحالي ليعمل على Apify ---
+OUTPUT_DIR = "." 
 
 
 def parse_aria(aria_text):
@@ -51,7 +52,6 @@ def save_excel(results, filepath):
     ws = wb.active
     ws.title = "Medical Leads"
 
-    # Header style
     header_font = Font(name='Arial', bold=True, color='FFFFFF', size=11)
     header_fill = PatternFill('solid', start_color='1F4E79')
     header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
@@ -68,7 +68,6 @@ def save_excel(results, filepath):
 
     ws.row_dimensions[1].height = 30
 
-    # Data rows
     link_font = Font(name='Arial', color='0563C1', underline='single', size=10)
     normal_font = Font(name='Arial', size=10)
     center_align = Alignment(horizontal='center', vertical='center')
@@ -82,45 +81,38 @@ def save_excel(results, filepath):
     )
 
     for row_idx, item in enumerate(results, 2):
-        # Alternate row color
         row_fill = PatternFill('solid', start_color='EBF3FB') if row_idx % 2 == 0 else PatternFill('solid', start_color='FFFFFF')
 
-        # #
         c = ws.cell(row=row_idx, column=1, value=row_idx - 1)
         c.font = normal_font
         c.alignment = center_align
         c.fill = row_fill
         c.border = thin_border
 
-        # Business Name
         c = ws.cell(row=row_idx, column=2, value=item['Business Name'])
         c.font = normal_font
         c.alignment = left_align
         c.fill = row_fill
         c.border = thin_border
 
-        # Phone
         c = ws.cell(row=row_idx, column=3, value=item['Phone'])
         c.font = normal_font
         c.alignment = center_align
         c.fill = row_fill
         c.border = thin_border
 
-        # Rating
         c = ws.cell(row=row_idx, column=4, value=item['Rating'])
         c.font = normal_font
         c.alignment = center_align
         c.fill = row_fill
         c.border = thin_border
 
-        # Reviews
         c = ws.cell(row=row_idx, column=5, value=item['Reviews'])
         c.font = normal_font
         c.alignment = center_align
         c.fill = row_fill
         c.border = thin_border
 
-        # Maps URL — رابط تفاعلي
         maps_url = item['Maps URL']
         if maps_url and maps_url != 'N/A':
             c = ws.cell(row=row_idx, column=6, value='فتح الخريطة')
@@ -133,7 +125,6 @@ def save_excel(results, filepath):
         c.fill = row_fill
         c.border = thin_border
 
-        # Website — رابط تفاعلي
         website = item['Website']
         if website and website != 'N/A':
             c = ws.cell(row=row_idx, column=7, value=short_url(website))
@@ -148,13 +139,10 @@ def save_excel(results, filepath):
 
         ws.row_dimensions[row_idx].height = 40
 
-    # Freeze header row
     ws.freeze_panes = 'A2'
-
     wb.save(filepath)
 
 async def scrape_google_maps(search_query, total_results_needed=150):
-
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -165,6 +153,8 @@ async def scrape_google_maps(search_query, total_results_needed=150):
 
         print(f"[*] Searching for: {search_query}")
         query = search_query.replace(" ", "+")
+        
+        # --- [تعديل] استخدام رابط الخرائط الرسمي المباشر لضمان ثبات جلب البيانات ---
         await page.goto(f"https://www.google.com/maps/search/{query}?hl=ar")
         await page.wait_for_timeout(5000)
 
@@ -176,27 +166,31 @@ async def scrape_google_maps(search_query, total_results_needed=150):
         rating_del_count = 0
         last_cards_count = 0
 
-        # ── PHASE 1: جمع البيانات من الـ cards ──
         print("[*] Phase 1: Collecting listings...")
 
         while len(results) < total_results_needed:
-
             if scroll_attempts >= MAX_SCROLL_ATTEMPTS:
                 print("[!] Max scroll reached")
                 break
 
             cards = await page.query_selector_all('div[role="article"]')
             new_cards = cards[last_cards_count:]
-            print(f"Cards: {len(cards)} (+{len(new_cards)} الجديدات)")
+            print(f"Cards found: {len(cards)} (+{len(new_cards)} new)")
 
             for card in cards[last_cards_count:]:
                 if len(results) >= total_results_needed:
                     break
                 try:
-                    name = await card.get_attribute("aria-label")
-                    if not name:
+                    # --- [تعديل هام] جلب الاسم من وسام الرابط الداخلي المحدث بدلاً من الأداة القديمة ---
+                    link_el = await card.query_selector("a.hfpxzc")
+                    name = "N/A"
+                    if link_el:
+                        name = await link_el.get_attribute("aria-label")
+                    
+                    if not name or name == "N/A":
                         empty_name_count += 1
                         continue
+                        
                     if name in seen:
                         duplicate_count += 1
                         continue
@@ -210,12 +204,7 @@ async def scrape_google_maps(search_query, total_results_needed=150):
                     if rating_el:
                         rating = (await rating_el.text_content()).strip()
 
-                    if rating == "N/A":
-                        rating_del_count += 1
-                        continue
-
                     # URL
-                    link_el = await card.query_selector("a.hfpxzc")
                     url = await link_el.get_attribute("href") if link_el else "N/A"
 
                     # Phone
@@ -241,38 +230,38 @@ async def scrape_google_maps(search_query, total_results_needed=150):
                     })
                     print(f"[+] {len(results)}. {name} | {phone} | {rating}")
                 except Exception as e:
-                    print("[!] Error:", e)
+                    print("[!] Error inside card parser:", e)
+            
             last_cards_count = len(cards)
             current_cards = len(await page.query_selector_all('div[role="article"]'))
             feed = await page.query_selector('div[role="feed"]')
             if feed:
                 await feed.evaluate("(el) => el.scrollBy(0, 3000)")
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(2500)
 
             try:
                 await page.wait_for_function(
                     "(count) => document.querySelectorAll('div[role=\"article\"]').length > count",
                     arg=current_cards,
-                    timeout=10000
+                    timeout=5000
                 )
             except:
                 pass
 
-            new_cards = len(await page.query_selector_all('div[role="article"]'))
-            if new_cards == current_cards:
+            new_cards_check = len(await page.query_selector_all('div[role="article"]'))
+            if new_cards_check == current_cards:
                 scroll_attempts += 1
             else:
                 scroll_attempts = 0
 
-        # ── PHASE 2: فتح صفحة كل عيادة لجلب Reviews ──
+        # ── PHASE 2: Reviews ──
         print(f"\n[*] Phase 2: Fetching reviews for {len(results)} clinics...")
-
         for index, item in enumerate(results):
             if item['Maps URL'] == "N/A":
                 continue
             try:
                 await page.goto(item['Maps URL'])
-                await page.wait_for_timeout(3500)
+                await page.wait_for_timeout(3000)
 
                 reviews_el = await page.query_selector('span.UY7F9')
                 if reviews_el:
@@ -286,18 +275,16 @@ async def scrape_google_maps(search_query, total_results_needed=150):
                         item['Reviews'] = reviews
 
                 print(f"[+] {index+1}/{len(results)}. {item['Business Name']} → Reviews: {item['Reviews']}")
-
             except Exception as e:
-                print(f"[!] Error: {e}")
+                print(f"[!] Error fetching review: {e}")
                 continue
 
         await browser.close()
 
-        # ── PHASE 3: حفظ النتائج ──
+        # ── PHASE 3: الحفظ داخل السيرفر ──
         csv_path = os.path.join(OUTPUT_DIR, "cleaned_medical_leads.csv")
         excel_path = os.path.join(OUTPUT_DIR, "cleaned_medical_leads.xlsx")
 
-        # تقرير جودة البيانات
         print("\n[*] Data Quality Report:")
         print(f"    Cards loaded       : {current_cards}")
         print(f"    Total records      : {len(results)}")
@@ -305,24 +292,15 @@ async def scrape_google_maps(search_query, total_results_needed=150):
         print(f"    With Website       : {sum(1 for r in results if r['Website'] != 'N/A')}")
         print(f"    With Reviews       : {sum(1 for r in results if r['Reviews'] != 'N/A')}")
         print(f"    With Rating        : {sum(1 for r in results if r['Rating'] != 'N/A')}")
-        print(f"    Without Rating     : {rating_del_count}")
-        print(f"    Duplicates         : {duplicate_count}")
-        print(f"    Empty names        : {empty_name_count}")
 
-        # CSV
-        df = pd.DataFrame(results)
-        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-
-        # Excel مع روابط تفاعلية
-        save_excel(results, excel_path)
-
-        print(f"\n[+] Done!")
-        print(f"[+] Total records: {len(results)}")
-        print(f"[+] CSV: {csv_path}")
-        print(f"[+] Excel: {excel_path}")
-
-        # فتح Excel تلقائياً
-        subprocess.Popen(['start', 'excel', excel_path], shell=True)
-        print("[+] Excel opened!")
+        if results:
+            df = pd.DataFrame(results)
+            df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+            save_excel(results, excel_path)
+            print(f"\n[+] Done successfully!")
+            print(f"[+] CSV saved to: {csv_path}")
+            print(f"[+] Excel saved to: {excel_path}")
+        else:
+            print("[!] No data collected to save.")
 
 asyncio.run(scrape_google_maps("عيادات أسنان في الرياض", total_results_needed=150))
