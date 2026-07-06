@@ -45,6 +45,8 @@ def clean_phone(raw):
         return '+971' + digits
     
 def short_url(url):
+    if not url or url == "N/A":
+        return "N/A"
     try:
         return urlparse(url).netloc.replace("www.", "")
     except:
@@ -165,7 +167,7 @@ async def scrape_google_maps(search_query, total_results_needed=80):
         scroll_attempts = 0
         last_cards_count = 0
 
-        print("[*] Progress: Extracting cards and navigating detail panels...")
+        print("[*] Progress: Extracting unique cards and matching details...")
 
         while len(results) < total_results_needed:
             if scroll_attempts >= MAX_SCROLL_ATTEMPTS:
@@ -196,6 +198,7 @@ async def scrape_google_maps(search_query, total_results_needed=80):
                     if await card.query_selector('h1.kpih0e'):
                         continue
 
+                    # جلب التقييمات فوراً من واجهة الكرت
                     rating = "N/A"
                     reviews = "N/A"
                     review_container = await card.query_selector('span.AJ76f')
@@ -210,30 +213,33 @@ async def scrape_google_maps(search_query, total_results_needed=80):
                     
                     if link_el:
                         await link_el.click()
-                        # انتظر لوحة التفاصيل الجانبية لتتحمل بالكامل قبل القراءة لضمان البيانات
-                        await page.wait_for_timeout(1200) 
-
-                        # 1. جلب رقم الهاتف
-                        phone_button = await page.query_selector('button[data-item-id^="phone:tel:"]')
-                        if phone_button:
-                            phone_raw = await phone_button.get_attribute('data-item-id')
-                            phone = clean_phone(phone_raw.replace("phone:tel:", "").strip())
                         
-                        if phone == "N/A":
-                            backup_phone = await page.query_selector('button[src*="phone"]')
-                            if backup_phone:
-                                phone = clean_phone(await backup_phone.inner_text())
+                        # --- الأمان الذكي: ننتظر حتى يتغير عنوان اللوحة الجانبية ليطابق اسم العيادة الفعلي ---
+                        matched = False
+                        for _ in range(10): # محاولة الانتظار لمدة تصل لـ 2 ثانية كحد أقصى
+                            panel_title_el = await page.query_selector('h1.DUwDvf')
+                            if panel_title_el:
+                                panel_title = await panel_title_el.inner_text()
+                                if name.strip() in panel_title.strip() or panel_title.strip() in name.strip():
+                                    matched = True
+                                    break
+                            await page.wait_for_timeout(200)
 
-                        # 2. جلب الموقع الإلكتروني الاحترافي والمحدث من اللوحة الجانبية
-                        web_button = await page.query_selector('a[data-item-id="authority"]')
-                        if web_button:
-                            website = await web_button.get_attribute('href')
-                        
-                        if website == "N/A" or not website:
-                            # فلتر بديل يبحث عن أي رابط داخل اللوحة الجانبية يحتوي على وسم الموقع
-                            backup_web = await page.query_selector('a[aria-label*="Website:"], a[src*="public_gm_blue"]')
-                            if backup_web:
-                                website = await backup_web.get_attribute('href')
+                        if matched:
+                            # 1. جلب رقم الهاتف المحدث بدقة
+                            phone_button = await page.query_selector('button[data-item-id^="phone:tel:"]')
+                            if phone_button:
+                                phone_raw = await phone_button.get_attribute('data-item-id')
+                                phone = clean_phone(phone_raw.replace("phone:tel:", "").strip())
+                            
+                            # 2. جلب الموقع الإلكتروني بدقة
+                            web_button = await page.query_selector('a[data-item-id="authority"]')
+                            if web_button:
+                                website = await web_button.get_attribute('href')
+                            else:
+                                backup_web = await page.query_selector('a[aria-label*="Website:"]')
+                                if backup_web:
+                                    website = await backup_web.get_attribute('href')
 
                     seen.add(name)
                     results.append({
@@ -242,9 +248,9 @@ async def scrape_google_maps(search_query, total_results_needed=80):
                         "Phone": phone,
                         "Rating": rating,
                         "Reviews": reviews,
-                        "Website": website
+                        "Website": website if website else "N/A"
                     })
-                    print(f"[+] {len(results)}. {name} | Phone: {phone} | Website: {short_url(website)}")
+                    print(f"[+] {len(results)}. {name} | Phone: {phone} | Rating: {rating} | Reviews: {reviews} | Website: {short_url(website) if website else 'N/A'}")
                 except Exception as e:
                     pass
             
@@ -252,7 +258,7 @@ async def scrape_google_maps(search_query, total_results_needed=80):
             feed = await page.query_selector('div[role="feed"]')
             if feed:
                 await feed.evaluate("(el) => el.scrollBy(0, 3500)")
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(2500)
 
         await browser.close()
 
@@ -264,8 +270,6 @@ async def scrape_google_maps(search_query, total_results_needed=80):
             df.to_csv(csv_path, index=False, encoding="utf-8-sig")
             save_excel(results, excel_path)
             print(f"\n[+] Extraction successfully completed!")
-            print(f"    Total Phones extracted : {sum(1 for r in results if r['Phone'] != 'N/A')}")
-            print(f"    Total Websites extracted : {sum(1 for r in results if r['Website'] != 'N/A')}")
         else:
             print("[!] No data collected.")
 
