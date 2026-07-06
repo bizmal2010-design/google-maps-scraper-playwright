@@ -1,87 +1,144 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import re
 import sys
 from playwright.async_api import async_playwright
 
-# لضمان ظهور النصوص العربية بشكل صحيح في سجلات النظام
 sys.stdout.reconfigure(encoding='utf-8')
+
+
+async def extract_name(card):
+    # الطريقة الأولى: من العنصر المخصص للاسم
+    name_el = await card.query_selector('div.qBF1Pd')
+    if name_el:
+        text = (await name_el.inner_text()).strip()
+        if text:
+            return text
+    # الطريقة الثانية، احتياطية: من aria-label الخاص برابط الكارد الرئيسي
+    link_el = await card.query_selector('a.hfpxzc')
+    if link_el:
+        label = await link_el.get_attribute('aria-label')
+        if label:
+            return label.strip()
+    return "N/A"
+
+
+async def extract_rating_and_reviews(card):
+    # الطريقة الأولى: aria-label واحدة تحتوي التقييم وعدد المراجعات معاً
+    wrapper = await card.query_selector('span.ZkP5Je')
+    if wrapper:
+        label = await wrapper.get_attribute('aria-label')
+        if label:
+            match = re.search(r'([\d.]+)\s*stars?\s*([\d,]+)\s*Reviews?', label, re.IGNORECASE)
+            if match:
+                return match.group(1), match.group(2).replace(',', '')
+
+    # الطريقة الثانية، احتياطية: من الكلاسات المنفصلة
+    rating_el = await card.query_selector('span.MW4etd')
+    reviews_el = await card.query_selector('span.UY7F9')
+    rating = (await rating_el.inner_text()).strip() if rating_el else "N/A"
+    reviews = "N/A"
+    if reviews_el:
+        raw = await reviews_el.inner_text()
+        reviews = raw.replace('(', '').replace(')', '').replace(',', '').strip()
+    return rating, reviews
+
+
+async def extract_phone(card):
+    # موجود مباشرة داخل الكارد، لا حاجة إطلاقاً لفتح لوحة التفاصيل
+    phone_el = await card.query_selector('span.UsdlK')
+    if phone_el:
+        return (await phone_el.inner_text()).strip()
+    return "N/A"
+
+
+async def extract_website(card):
+    # يظهر فقط إذا كانت العيادة تملك موقعاً إلكترونياً
+    web_el = await card.query_selector('a.lcr4fd[data-value="Website"]')
+    if web_el:
+        href = await web_el.get_attribute('href')
+        if href:
+            return href
+    return "N/A"
+
+
+async def extract_place_url(card):
+    link_el = await card.query_selector('a.hfpxzc')
+    if link_el:
+        href = await link_el.get_attribute('href')
+        if href:
+            return href
+    return "N/A"
+
 
 async def scrape_google_maps(search_query, total_results=80):
     async with async_playwright() as p:
-        # 1. إعداد المتصفح: استخدام locale و hl=en يضمن استقرار الكلاسات البرمجية
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            locale="en-US"
+            locale="en-US",
+            viewport={"width": 1600, "height": 900}
         )
         page = await context.new_page()
-        
-        print(f"[*] بدء البحث عن: {search_query}")
+
+        print(f"[*] البحث عن: {search_query}")
         await page.goto(f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}?hl=en")
-        await page.wait_for_timeout(6000)
+        await page.wait_for_timeout(5000)
 
         results = []
         seen = set()
+        stagnant_rounds = 0
 
         while len(results) < total_results:
             cards = await page.query_selector_all('div[role="article"]')
-            
+            new_in_this_round = 0
+
             for card in cards:
-                if len(results) >= total_results: break
-                
+                if len(results) >= total_results:
+                    break
                 try:
-                    # 2. استخراج الاسم
-                    name_el = await card.query_selector('div.qBF1Pd')
-                    name = await name_el.inner_text() if name_el else "N/A"
-                    if name in seen or name == "N/A": continue
-                    
-                    # 3. استخدام Evaluate لجلب التقييم والمراجعات مباشرة من الـ DOM
-                    data = await card.evaluate("""(element) => {
-                        const r = element.querySelector('span.MW4etd');
-                        const rev = element.querySelector('span.UY7F9');
-                        return {
-                            rating: r ? r.innerText : 'N/A',
-                            reviews: rev ? rev.innerText.replace(/[()]/g, '').replace(',', '') : 'N/A'
-                        };
-                    }""")
-                    
-                    # 4. الدخول للوحة التفاصيل لجلب الهاتف والموقع
-                    await card.click()
-                    await page.wait_for_timeout(3000)
-                    
-                    phone = "N/A"
-                    website = "N/A"
-                    
-                    # البحث عن الهاتف (مع محاولة ثانية ذكية)
-                    phone_btn = await page.query_selector('button[data-tooltip="Copy phone number"]')
-                    if phone_btn:
-                        phone = (await phone_btn.get_attribute('aria-label')).replace("Phone: ", "").strip()
+                    place_url = await extract_place_url(card)
+                    name = await extract_name(card)
+                    key = place_url if place_url != "N/A" else name
 
-                    # البحث عن الموقع الإلكتروني
-                    web_btn = await page.query_selector('a[data-tooltip="Open website"]')
-                    if web_btn:
-                        website = await web_btn.get_attribute('href')
+                    if key in seen or name == "N/A":
+                        continue
 
-                    results.append({"Name": name, "Rating": data['rating'], "Reviews": data['reviews'], "Phone": phone, "Website": website})
-                    print(f"[+] تم استخراج: {name} | المراجعات: {data['reviews']} | الهاتف: {phone}")
-                    seen.add(name)
-                    
-                    # العودة للقائمة
-                    await page.keyboard.press("Escape")
-                    await page.wait_for_timeout(500)
-                    
+                    rating, reviews = await extract_rating_and_reviews(card)
+                    phone = await extract_phone(card)
+                    website = await extract_website(card)
+
+                    results.append({
+                        "Name": name,
+                        "Rating": rating,
+                        "Reviews": reviews,
+                        "Phone": phone,
+                        "Website": website,
+                        "MapURL": place_url
+                    })
+                    print(f"[+] تم استخراج: {name} | الهاتف: {phone} | التقييم: {rating} ({reviews})")
+                    seen.add(key)
+                    new_in_this_round += 1
+
                 except Exception:
-                    await page.keyboard.press("Escape")
                     continue
-            
-            # التمرير للأسفل
-            await page.keyboard.press("PageDown")
-            await page.wait_for_timeout(2500)
 
+            await page.mouse.wheel(0, 2000)
+            await page.wait_for_timeout(2000)
+
+            if new_in_this_round == 0:
+                stagnant_rounds += 1
+                if stagnant_rounds >= 3:
+                    print("[!] لا توجد نتائج جديدة بعد عدة محاولات تمرير، تم إيقاف البحث.")
+                    break
+            else:
+                stagnant_rounds = 0
+
+        print(f"[*] تمت المهمة بنجاح. إجمالي النتائج: {len(results)}")
         await browser.close()
-        print("[*] تمت العملية بنجاح.")
         return results
 
+
 if __name__ == "__main__":
-    # تشغيل الدالة
-    asyncio.run(scrape_google_maps("Dental Clinics in Dubai"))
+    data = asyncio.run(scrape_google_maps("Dental Clinics in Dubai"))
+    # هنا يمكنك إضافة كود حفظ البيانات في ملف Excel باستخدام openpyxl
