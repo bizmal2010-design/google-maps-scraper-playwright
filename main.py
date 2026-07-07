@@ -30,7 +30,9 @@ async def extract_name(card):
 async def extract_rating_and_reviews(card):
     rating = "N/A"
     reviews = "N/A"
-    wrapper = await card.query_selector('span.ZkP5Je')
+    
+    # طريقة 1: البحث عن النص الشامل للتقييمات من خلال الخاصية aria-label التي تحتوي على كلمة stars
+    wrapper = await card.query_selector('span[aria-label*="stars" i]')
     if wrapper:
         label = await wrapper.get_attribute('aria-label')
         if label:
@@ -39,6 +41,8 @@ async def extract_rating_and_reviews(card):
                 rating = match.group(1)
                 reviews = match.group(2).replace(',', '')
                 return rating, reviews
+
+    # طريقة 2: الكلاسات الافتراضية كخيار احتياطي
     rating_el = await card.query_selector('span.MW4etd')
     reviews_el = await card.query_selector('span.UY7F9')
     if rating_el:
@@ -58,8 +62,6 @@ async def extract_place_url(card):
     return "N/A"
 
 async def fetch_details_in_new_tab(context, place_url, timeout=15000):
-    # نفتح تبويباً مستقلاً لهذه العيادة تحديداً، بدل الضغط داخل صفحة القائمة نفسها،
-    # هذا يتجنب مشكلة توقف التنقل الداخلي بعد أول استخدام
     detail_page = await context.new_page()
     phone, website, reviews = "N/A", "N/A", "N/A"
     try:
@@ -70,19 +72,33 @@ async def fetch_details_in_new_tab(context, place_url, timeout=15000):
         await detail_page.goto(place_url, timeout=timeout)
         await detail_page.wait_for_selector('div.m6QErb.XiKgde[role="region"]', timeout=timeout)
 
+        # 1. استخراج رقم الهاتف
         phone = await get_phone_from_sidebar(detail_page)
 
+        # 2. استخراج الموقع الإلكتروني
         web_btn = await detail_page.query_selector('a[data-item-id="authority"]')
         if web_btn:
             website = await web_btn.get_attribute('href') or "N/A"
 
-        rev_el = await detail_page.query_selector('div.F7nice span[role="img"]')
-        if rev_el:
-            lbl = await rev_el.get_attribute('aria-label')
-            if lbl:
-                match = re.search(r'([\d,]+)', lbl)
-                if match:
-                    reviews = match.group(1).replace(',', '')
+        # 3. [تعديل جوهري] استخراج عدد المراجعات بشكل دقيق ومقاوم للأخطاء من التبويب الداخلي
+        f7nice_el = await detail_page.query_selector('div.F7nice')
+        if f7nice_el:
+            f7_text = await f7nice_el.inner_text() # يجلب نص مثل "4.9(1,250)" أو "4.9 1,250 reviews"
+            
+            # فحص أولاً إذا كان عدد المراجعات محاطاً بأقواس (النمط الشائع في خرائط جوجل)
+            paren_match = re.search(r'\(([\d,]+)\)', f7_text)
+            if paren_match:
+                reviews = paren_match.group(1).replace(',', '')
+            else:
+                # فحص احتياطي من خلال الـ aria-label للـ العناصر الداخلية لتفادي التقاط التقييم كـ Integer
+                labels = await f7nice_el.query_selector_all('[aria-label]')
+                for l in labels:
+                    lbl = await l.get_attribute('aria-label')
+                    rev_match = re.search(r'([\d,]+)\s*reviews?', lbl, re.IGNORECASE)
+                    if rev_match:
+                        reviews = rev_match.group(1).replace(',', '')
+                        break
+                        
     except Exception:
         pass
     finally:
@@ -159,10 +175,10 @@ async def scrape_google_maps(search_query, total_results=80):
 
                     rating, reviews = await extract_rating_and_reviews(card_handle)
 
-                    # لا نضغط على شيء في صفحة القائمة إطلاقاً، بل نذهب لرابط العيادة في تبويب مستقل
+                    # الانتقال للتبويب المستقل لجلب الهاتف والموقع وتأكيد المراجعات
                     if place_url != "N/A":
                         phone, website, fallback_reviews = await fetch_details_in_new_tab(context, place_url)
-                        if reviews == "N/A":
+                        if reviews == "N/A" or reviews == "":
                             reviews = fallback_reviews
                     else:
                         phone, website = "N/A", "N/A"
@@ -193,5 +209,3 @@ async def scrape_google_maps(search_query, total_results=80):
 
 if __name__ == "__main__":
     data = asyncio.run(scrape_google_maps("Dental Clinics in Dubai"))
-    for i, item in enumerate(data, 1):
-        print(f"{i}. {item['Name']} | Phone: {item['Phone']} | Rating: {item['Rating']} | Reviews: {item['Reviews']} | Website: {item['Website']}")
