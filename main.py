@@ -24,19 +24,16 @@ async def extract_rating_and_reviews(card):
     rating = "N/A"
     reviews = "N/A"
     
-    # Method 1: Try finding the aria-label inside the outer card
     wrapper = await card.query_selector('span[role="img"]')
     if wrapper:
         label = await wrapper.get_attribute('aria-label')
         if label:
-            # Better Regex to match "4.9 stars 1,107 Reviews"
             match = re.search(r'([\d.]+)\s*stars?\s*([\d,]+)\s*Reviews?', label, re.IGNORECASE)
             if match:
                 rating = match.group(1)
                 reviews = match.group(2).replace(',', '')
                 return rating, reviews
 
-    # Method 2: Fallback to specific spans in the outer card
     rating_el = await card.query_selector('span.MW4etd')
     reviews_el = await card.query_selector('span.UY7F9')
     
@@ -46,7 +43,6 @@ async def extract_rating_and_reviews(card):
         
     if reviews_el:
         raw = await reviews_el.inner_text()
-        # Remove all non-numeric characters (brackets, commas, etc.)
         reviews = re.sub(r'[^\d]', '', raw)
         
     return rating, reviews
@@ -76,9 +72,14 @@ async def extract_place_url(card):
 
 async def scrape_google_maps(search_query, total_results=80):
     async with async_playwright() as p:
+        # إضافة إعدادات لمنع انهيار الذاكرة
         browser = await p.chromium.launch(
             headless=True,
-            args=['--lang=en-US', '--disable-blink-features=AutomationControlled']
+            args=[
+                '--lang=en-US', 
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage' # يحمي المتصفح من الانهيار عند امتلاء الذاكرة
+            ]
         )
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -86,117 +87,133 @@ async def scrape_google_maps(search_query, total_results=80):
             viewport={"width": 1600, "height": 900}
         )
         page = await context.new_page()
-
         print(f"[*] Starting search for: {search_query}")
+        
+        # حظر الصور لتسريع الكشط ومنع الانهيار
+        await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_())
+        
         await page.goto(f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}?hl=en")
         await page.wait_for_timeout(5000)
 
         results = []
         seen = set()
         stagnant_rounds = 0
+        current_index = 0 # تعقب مكاننا في القائمة بدلاً من حلقة for الكبيرة
 
         while len(results) < total_results:
-            cards = await page.query_selector_all('div[role="article"]')
-            new_in_this_round = 0
+            cards_locator = page.locator('div[role="article"]')
+            count = await cards_locator.count()
 
-            for i in range(len(cards)):
-                if len(results) >= total_results:
-                    break
-                
-                current_cards = await page.query_selector_all('div[role="article"]')
-                if i >= len(current_cards):
-                    break
-                card = current_cards[i]
+            # إذا وصلنا لنهاية القائمة المحملة، نقوم بالتمرير لأسفل
+            if current_index >= count:
+                if count > 0:
+                    last_card = cards_locator.nth(count - 1)
+                    await last_card.hover()
+                await page.mouse.wheel(0, 3000)
+                await page.wait_for_timeout(3000)
 
-                try:
-                    place_url = await extract_place_url(card)
-                    name = await extract_name(card)
-                    key = place_url if place_url != "N/A" else name
+                new_count = await cards_locator.count()
+                if new_count == count:
+                    stagnant_rounds += 1
+                    if stagnant_rounds >= 3:
+                        print("[!] No new results found after several scroll attempts. Stopping search.")
+                        break
+                else:
+                    stagnant_rounds = 0
+                continue
 
-                    if key in seen or name == "N/A":
-                        continue
+            # استخراج عيادة واحدة فقط في كل مرة للحفاظ على الذاكرة
+            card_handle = await cards_locator.nth(current_index).element_handle()
+            if not card_handle:
+                current_index += 1
+                continue
 
-                    rating, reviews = await extract_rating_and_reviews(card)
-                    phone = await extract_phone_from_card(card)
-                    website = await extract_website_from_card(card)
+            try:
+                place_url = await extract_place_url(card_handle)
+                name = await extract_name(card_handle)
+                key = place_url if place_url != "N/A" else name
 
-                    # Condition to click: missing phone, website, OR reviews
-                    if phone == "N/A" or website == "N/A" or reviews == "N/A":
-                        link_to_click = await card.query_selector('a.hfpxzc')
-                        if link_to_click:
-                            await link_to_click.click()
-                            
-                            # VITAL FIX: Wait for the sidebar Title to match the current clinic name.
-                            # This prevents scraping the old clinic's data while the new one is loading!
-                            try:
-                                # Escape quotes in name to prevent selector errors
-                                safe_name = name.replace('"', '\\"')
-                                await page.wait_for_selector(f'h1.DUwDvf:has-text("{safe_name}")', timeout=5000)
-                            except Exception:
-                                # Fallback wait if exact name match fails
-                                await page.wait_for_timeout(3000)
-                            
-                            # Extract Reviews from inner sidebar if still missing
-                            if reviews == "N/A":
-                                rev_el = await page.query_selector('div.F7nice span[role="img"]')
-                                if rev_el:
-                                    lbl = await rev_el.get_attribute('aria-label')
-                                    if lbl:
-                                        match = re.search(r'([\d,]+)\s*reviews?', lbl, re.IGNORECASE)
-                                        if match:
-                                            reviews = match.group(1).replace(',', '')
-
-                            # Extract Phone from sidebar
-                            if phone == "N/A":
-                                phone_btn = await page.query_selector('button[data-item-id^="phone:tel:"]')
-                                if phone_btn:
-                                    phone_data = await phone_btn.get_attribute('data-item-id')
-                                    phone = phone_data.replace('phone:tel:', '')
-                            
-                            # Extract Website from sidebar
-                            if website == "N/A":
-                                web_btn = await page.query_selector('a[data-item-id="authority"]')
-                                if web_btn:
-                                    website = await web_btn.get_attribute('href')
-
-                            # Go back to the list
-                            back_btn = await page.query_selector('button[aria-label="Back"], button[aria-label="رجوع"]')
-                            if back_btn:
-                                await back_btn.click()
-                                await page.wait_for_timeout(1500)
-
-                    results.append({
-                        "Name": name,
-                        "Rating": rating,
-                        "Reviews": reviews,
-                        "Phone": phone,
-                        "Website": website,
-                        "MapURL": place_url
-                    })
-                    
-                    print(f"[+] Extracted: {name} | Phone: {phone} | Rating: {rating} | Reviews: {reviews} | Website: {website} | MapURL: {place_url}")
-                    seen.add(key)
-                    new_in_this_round += 1
-
-                except Exception as e:
-                    print(f"[-] Error extracting data for a clinic: {e}")
-                    back_btn = await page.query_selector('button[aria-label="Back"], button[aria-label="رجوع"]')
-                    if back_btn:
-                        await back_btn.click()
-                        await page.wait_for_timeout(1000)
+                if key in seen or name == "N/A":
+                    await card_handle.dispose() # تفريغ الذاكرة
+                    current_index += 1
                     continue
 
-            # Scroll to load more
-            await page.mouse.wheel(0, 2000)
-            await page.wait_for_timeout(3000)
+                rating, reviews = await extract_rating_and_reviews(card_handle)
+                phone = await extract_phone_from_card(card_handle)
+                website = await extract_website_from_card(card_handle)
 
-            if new_in_this_round == 0:
-                stagnant_rounds += 1
-                if stagnant_rounds >= 3:
-                    print("[!] No new results found after several scroll attempts. Stopping search.")
-                    break
-            else:
-                stagnant_rounds = 0
+                # النقر على العيادة إذا احتجنا بيانات إضافية
+                if phone == "N/A" or website == "N/A" or reviews == "N/A":
+                    link_to_click = await card_handle.query_selector('a.hfpxzc')
+                    if link_to_click:
+                        await link_to_click.click()
+                        
+                        # [الحل الأساسي لتضارب البيانات] الانتظار حتى يتغير اسم العيادة في اللوحة الجانبية
+                        try:
+                            escaped_name = re.escape(name)
+                            # ننتظر ظهور اسم العيادة الجديدة في العنوان الرئيسي
+                            await page.locator('h1.DUwDvf').filter(has_text=re.compile(escaped_name, re.IGNORECASE)).wait_for(state="visible", timeout=6000)
+                            # نعطي واجهة المتصفح نصف ثانية لتفريغ البيانات القديمة (رقم الهاتف) وعرض الجديدة
+                            await page.wait_for_timeout(500)
+                        except Exception:
+                            # في حال فشل التطابق الدقيق، نعتمد على انتظار ثابت قصير كبديل
+                            await page.wait_for_timeout(2500)
+                        
+                        # كشط المراجعات من اللوحة الجانبية
+                        if reviews == "N/A":
+                            rev_el = await page.query_selector('div.F7nice span[role="img"]')
+                            if rev_el:
+                                lbl = await rev_el.get_attribute('aria-label')
+                                if lbl:
+                                    match = re.search(r'([\d,]+)\s*reviews?', lbl, re.IGNORECASE)
+                                    if match:
+                                        reviews = match.group(1).replace(',', '')
+
+                        # كشط رقم الهاتف من اللوحة الجانبية
+                        if phone == "N/A":
+                            phone_btn = await page.query_selector('button[data-item-id^="phone:tel:"]')
+                            if phone_btn:
+                                phone_data = await phone_btn.get_attribute('data-item-id')
+                                phone = phone_data.replace('phone:tel:', '')
+                        
+                        # كشط الموقع من اللوحة الجانبية
+                        if website == "N/A":
+                            web_btn = await page.query_selector('a[data-item-id="authority"]')
+                            if web_btn:
+                                website = await web_btn.get_attribute('href')
+
+                        # العودة للقائمة
+                        back_btn = page.locator('button[aria-label="Back"], button[aria-label="رجوع"]')
+                        if await back_btn.count() > 0:
+                            await back_btn.first.click()
+                            await page.wait_for_timeout(1500)
+
+                results.append({
+                    "Name": name,
+                    "Rating": rating,
+                    "Reviews": reviews,
+                    "Phone": phone,
+                    "Website": website,
+                    "MapURL": place_url
+                })
+                
+                print(f"[+] Extracted: {name} | Phone: {phone} | Rating: {rating} | Reviews: {reviews}")
+                seen.add(key)
+
+            except Exception as e:
+                print(f"[-] Error extracting data for a clinic: {e}")
+                # محاولة الرجوع إذا حدث خطأ لضمان استمرار الكشط للعيادة التالية
+                try:
+                    back_btn = page.locator('button[aria-label="Back"], button[aria-label="رجوع"]')
+                    if await back_btn.count() > 0:
+                        await back_btn.first.click()
+                        await page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+            
+            # خطوة هامة جداً: حذف العنصر من الذاكرة لمنع الانهيار (Target Crashed)
+            await card_handle.dispose()
+            current_index += 1
 
         print(f"[*] Task completed successfully. Total results: {len(results)}")
         await browser.close()
