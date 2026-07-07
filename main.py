@@ -6,38 +6,6 @@ from playwright.async_api import async_playwright
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-
-async def extract_name(card):
-    # الطريقة الأولى: من العنصر المخصص للاسم
-    name_el = await card.query_selector('div.qBF1Pd')
-    if name_el:
-        text = (await name_el.inner_text()).strip()
-        if text:
-            return text
-    # الطريقة الثانية، احتياطية: من aria-label الخاص برابط الكارد الرئيسي
-    link_el = await card.query_selector('a.hfpxzc')
-    if link_el:
-        label = await link_el.get_attribute('aria-label')
-        if label:
-            return label.strip()
-    return "N/A"
-
-
-async def extract_rating_and_reviews(card):
-    # الطريقة الأولى: aria-label واحدة تحتوي التقييم وعدد المراجعات معاً
-    wrapper = await card.query_selector('span.ZkP5Je')
-    if wrapper:
-        label = await wrapper.get_attribute('aria-label')
-        if label:
-            match = re.search(r'([\d.]+)\s*stars?\s*([\d,]+)\s*Reviews?', label, re.IGNORECASE)
-            if match:# -*- coding: utf-8 -*-
-import asyncio
-import re
-import sys
-from playwright.async_api import async_playwright
-
-sys.stdout.reconfigure(encoding='utf-8')
-
 async def extract_name(card):
     name_el = await card.query_selector('div.qBF1Pd')
     if name_el:
