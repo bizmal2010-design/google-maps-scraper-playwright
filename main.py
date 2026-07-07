@@ -6,6 +6,15 @@ from playwright.async_api import async_playwright
 
 sys.stdout.reconfigure(encoding='utf-8')
 
+# دالة مساعدة لقراءة رقم الهاتف من اللوحة الجانبية
+async def get_phone_from_sidebar(page):
+    phone_btn = await page.query_selector('button[data-item-id^="phone:tel:"]')
+    if phone_btn:
+        phone_data = await phone_btn.get_attribute('data-item-id')
+        if phone_data:
+            return phone_data.replace('phone:tel:', '')
+    return "N/A"
+
 async def extract_name(card):
     name_el = await card.query_selector('div.qBF1Pd')
     if name_el:
@@ -72,13 +81,13 @@ async def extract_place_url(card):
 
 async def scrape_google_maps(search_query, total_results=80):
     async with async_playwright() as p:
-        # إضافة إعدادات لمنع انهيار الذاكرة
+        # إعداد المتصفح مع بعض الوسائط لتقليل فرص الانهيار
         browser = await p.chromium.launch(
             headless=True,
             args=[
-                '--lang=en-US', 
+                '--lang=en-US',
                 '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage' # يحمي المتصفح من الانهيار عند امتلاء الذاكرة
+                '--disable-dev-shm-usage'
             ]
         )
         context = await browser.new_context(
@@ -88,23 +97,23 @@ async def scrape_google_maps(search_query, total_results=80):
         )
         page = await context.new_page()
         print(f"[*] Starting search for: {search_query}")
-        
-        # حظر الصور لتسريع الكشط ومنع الانهيار
+
+        # حظر الموارد الثقيلة لتسريع الكشط
         await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_())
-        
+
         await page.goto(f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}?hl=en")
         await page.wait_for_timeout(5000)
 
         results = []
         seen = set()
         stagnant_rounds = 0
-        current_index = 0 # تعقب مكاننا في القائمة بدلاً من حلقة for الكبيرة
+        current_index = 0
 
         while len(results) < total_results:
             cards_locator = page.locator('div[role="article"]')
             count = await cards_locator.count()
 
-            # إذا وصلنا لنهاية القائمة المحملة، نقوم بالتمرير لأسفل
+            # تمرير لتحميل المزيد إن لزم
             if current_index >= count:
                 if count > 0:
                     last_card = cards_locator.nth(count - 1)
@@ -122,7 +131,6 @@ async def scrape_google_maps(search_query, total_results=80):
                     stagnant_rounds = 0
                 continue
 
-            # استخراج عيادة واحدة فقط في كل مرة للحفاظ على الذاكرة
             card_handle = await cards_locator.nth(current_index).element_handle()
             if not card_handle:
                 current_index += 1
@@ -134,7 +142,7 @@ async def scrape_google_maps(search_query, total_results=80):
                 key = place_url if place_url != "N/A" else name
 
                 if key in seen or name == "N/A":
-                    await card_handle.dispose() # تفريغ الذاكرة
+                    await card_handle.dispose()
                     current_index += 1
                     continue
 
@@ -147,19 +155,28 @@ async def scrape_google_maps(search_query, total_results=80):
                     link_to_click = await card_handle.query_selector('a.hfpxzc')
                     if link_to_click:
                         await link_to_click.click()
-                        
-                        # [الحل الأساسي لتضارب البيانات] الانتظار حتى يتغير اسم العيادة في اللوحة الجانبية
-                        try:
-                            escaped_name = re.escape(name)
-                            # ننتظر ظهور اسم العيادة الجديدة في العنوان الرئيسي
-                            await page.locator('h1.DUwDvf').filter(has_text=re.compile(escaped_name, re.IGNORECASE)).wait_for(state="visible", timeout=6000)
-                            # نعطي واجهة المتصفح نصف ثانية لتفريغ البيانات القديمة (رقم الهاتف) وعرض الجديدة
+
+                        # حفظ رقم الهاتف القديم قبل الانتظار
+                        old_phone = phone
+
+                        # انتظار حتى يتغير رقم الهاتف في اللوحة الجانبية (محاولة حتى 10 مرات، كل 0.5 ثانية)
+                        for _ in range(10):
+                            current_sidebar_phone = await get_phone_from_sidebar(page)
+                            if current_sidebar_phone != old_phone:
+                                phone = current_sidebar_phone
+                                break
                             await page.wait_for_timeout(500)
-                        except Exception:
-                            # في حال فشل التطابق الدقيق، نعتمد على انتظار ثابت قصير كبديل
-                            await page.wait_for_timeout(2500)
-                        
-                        # كشط المراجعات من اللوحة الجانبية
+
+                        # إذا لم يتغير الهاتف بعد المحاولات، نستخدم انتظار اسم العيادة كبديل
+                        if phone == old_phone:
+                            try:
+                                escaped_name = re.escape(name)
+                                await page.locator('h1.DUwDvf').filter(has_text=re.compile(escaped_name, re.IGNORECASE)).wait_for(state="visible", timeout=6000)
+                                await page.wait_for_timeout(500)
+                            except Exception:
+                                await page.wait_for_timeout(2500)
+
+                        # كشط المراجعات من اللوحة الجانبية إذا لازالت مفقودة
                         if reviews == "N/A":
                             rev_el = await page.query_selector('div.F7nice span[role="img"]')
                             if rev_el:
@@ -169,14 +186,15 @@ async def scrape_google_maps(search_query, total_results=80):
                                     if match:
                                         reviews = match.group(1).replace(',', '')
 
-                        # كشط رقم الهاتف من اللوحة الجانبية
-                        if phone == "N/A":
+                        # محاولة أخيرة لقراءة الهاتف من اللوحة الجانبية إن لم يتغير بعد
+                        if phone == "N/A" or phone == old_phone:
                             phone_btn = await page.query_selector('button[data-item-id^="phone:tel:"]')
                             if phone_btn:
                                 phone_data = await phone_btn.get_attribute('data-item-id')
-                                phone = phone_data.replace('phone:tel:', '')
-                        
-                        # كشط الموقع من اللوحة الجانبية
+                                if phone_data:
+                                    phone = phone_data.replace('phone:tel:', '')
+
+                        # كشط الموقع من اللوحة الجانبية إن كان مفقودًا
                         if website == "N/A":
                             web_btn = await page.query_selector('a[data-item-id="authority"]')
                             if web_btn:
@@ -196,13 +214,12 @@ async def scrape_google_maps(search_query, total_results=80):
                     "Website": website,
                     "MapURL": place_url
                 })
-                
+
                 print(f"[+] Extracted: {name} | Phone: {phone} | Rating: {rating} | Reviews: {reviews}")
                 seen.add(key)
 
             except Exception as e:
                 print(f"[-] Error extracting data for a clinic: {e}")
-                # محاولة الرجوع إذا حدث خطأ لضمان استمرار الكشط للعيادة التالية
                 try:
                     back_btn = page.locator('button[aria-label="Back"], button[aria-label="رجوع"]')
                     if await back_btn.count() > 0:
@@ -210,8 +227,8 @@ async def scrape_google_maps(search_query, total_results=80):
                         await page.wait_for_timeout(1000)
                 except Exception:
                     pass
-            
-            # خطوة هامة جداً: حذف العنصر من الذاكرة لمنع الانهيار (Target Crashed)
+
+            # تفريغ الذاكرة للعنصر الحالي
             await card_handle.dispose()
             current_index += 1
 
@@ -221,3 +238,7 @@ async def scrape_google_maps(search_query, total_results=80):
 
 if __name__ == "__main__":
     data = asyncio.run(scrape_google_maps("Dental Clinics in Dubai"))
+    # طباعة ملخص النتائج
+    for i, item in enumerate(data, 1):
+        print(f"{i}. {item['Name']} | Phone: {item['Phone']} | Rating: {item['Rating']} | Reviews: {item['Reviews']}")
+
