@@ -103,7 +103,7 @@ async def main():
     async with Actor:
         # يمكنك جلب الكلمات البحثية من الـ Input الخاص بالمنصة أو كتابتها مباشرة هنا
         actor_input = await Actor.get_input() or {}
-        search_query = actor_input.get("search_query", "Dental Clinics in Dubai")
+        search_query = actor_input.get("search_query", "Dental Clinics in Dubai Marina")
         total_results = actor_input.get("total_results", 80)
 
         async with async_playwright() as p:
