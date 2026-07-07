@@ -18,5 +18,5 @@
             "prefill": 80
         }
     },
-    "required": ["Dental Clinics in Dubai Marina"]
+    "required": ["search_query"]
 }
