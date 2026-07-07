@@ -3,6 +3,7 @@ import asyncio
 import re
 import sys
 from playwright.async_api import async_playwright
+from openpyxl import Workbook  # استيراد مكتبة الإكسيل
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -31,7 +32,6 @@ async def extract_rating_and_reviews(card):
     rating = "N/A"
     reviews = "N/A"
     
-    # طريقة 1: البحث عن النص الشامل للتقييمات من خلال الخاصية aria-label التي تحتوي على كلمة stars
     wrapper = await card.query_selector('span[aria-label*="stars" i]')
     if wrapper:
         label = await wrapper.get_attribute('aria-label')
@@ -42,7 +42,6 @@ async def extract_rating_and_reviews(card):
                 reviews = match.group(2).replace(',', '')
                 return rating, reviews
 
-    # طريقة 2: الكلاسات الافتراضية كخيار احتياطي
     rating_el = await card.query_selector('span.MW4etd')
     reviews_el = await card.query_selector('span.UY7F9')
     if rating_el:
@@ -72,25 +71,20 @@ async def fetch_details_in_new_tab(context, place_url, timeout=15000):
         await detail_page.goto(place_url, timeout=timeout)
         await detail_page.wait_for_selector('div.m6QErb.XiKgde[role="region"]', timeout=timeout)
 
-        # 1. استخراج رقم الهاتف
         phone = await get_phone_from_sidebar(detail_page)
 
-        # 2. استخراج الموقع الإلكتروني
         web_btn = await detail_page.query_selector('a[data-item-id="authority"]')
         if web_btn:
             website = await web_btn.get_attribute('href') or "N/A"
 
-        # 3. [تعديل جوهري] استخراج عدد المراجعات بشكل دقيق ومقاوم للأخطاء من التبويب الداخلي
         f7nice_el = await detail_page.query_selector('div.F7nice')
         if f7nice_el:
-            f7_text = await f7nice_el.inner_text() # يجلب نص مثل "4.9(1,250)" أو "4.9 1,250 reviews"
+            f7_text = await f7nice_el.inner_text()
             
-            # فحص أولاً إذا كان عدد المراجعات محاطاً بأقواس (النمط الشائع في خرائط جوجل)
             paren_match = re.search(r'\(([\d,]+)\)', f7_text)
             if paren_match:
                 reviews = paren_match.group(1).replace(',', '')
             else:
-                # فحص احتياطي من خلال الـ aria-label للـ العناصر الداخلية لتفادي التقاط التقييم كـ Integer
                 labels = await f7nice_el.query_selector_all('[aria-label]')
                 for l in labels:
                     lbl = await l.get_attribute('aria-label')
@@ -175,7 +169,6 @@ async def scrape_google_maps(search_query, total_results=80):
 
                     rating, reviews = await extract_rating_and_reviews(card_handle)
 
-                    # الانتقال للتبويب المستقل لجلب الهاتف والموقع وتأكيد المراجعات
                     if place_url != "N/A":
                         phone, website, fallback_reviews = await fetch_details_in_new_tab(context, place_url)
                         if reviews == "N/A" or reviews == "":
@@ -208,4 +201,29 @@ async def scrape_google_maps(search_query, total_results=80):
         return results
 
 if __name__ == "__main__":
-    data = asyncio.run(scrape_google_maps("Dental Clinics in Dubai"))
+    # 1. تشغيل عملية الكشط
+    data = asyncio.run(scrape_google_maps("Dental Clinics in Dubai", total_results=80))
+    
+    # 2. حفظ البيانات في ملف إكسيل حقيقي (.xlsx)
+    if data:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Dubai Clinics"
+        
+        # كتابة أسماء الأعمدة (العناوين) في الصف الأول
+        headers = list(data[0].keys())
+        ws.append(headers)
+        
+        # كتابة البيانات صفاً تلو الآخر
+        for item in data:
+            row_data = [item[key] for key in headers]
+            ws.append(row_data)
+            
+        # حفظ ملف الإكسيل
+        file_name = "dubai_dental_clinics.xlsx"
+        wb.save(file_name)
+        
+        print(f"\n[*] تم بنجاح إنشاء ملف إكسيل حقيقي باسم: {file_name}")
+        print("[*] ستجد الملف الآن داخل المجلد نفسه الذي قمت بتشغيل الكود منه.")
+    else:
+        print("\n[-] لم يتم استخراج أي بيانات لحفظها في ملف إكسيل.")
