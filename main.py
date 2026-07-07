@@ -57,26 +57,38 @@ async def extract_place_url(card):
             return href
     return "N/A"
 
-async def wait_for_panel_ready(page, expected_name, timeout=8000):
-    # شرط مستقل عن اللغة: بعض العيادات تفتح لوحتها بالإنجليزية وبعضها بالعربية
-    # (Information for ... / معلومات عن ...)، لذلك نعتمد على الكلاسات الثابتة
-    # بدل نص العنوان، ونتحقق فقط أن اسم العيادة موجود بداخله
+async def fetch_details_in_new_tab(context, place_url, timeout=15000):
+    # نفتح تبويباً مستقلاً لهذه العيادة تحديداً، بدل الضغط داخل صفحة القائمة نفسها،
+    # هذا يتجنب مشكلة توقف التنقل الداخلي بعد أول استخدام
+    detail_page = await context.new_page()
+    phone, website, reviews = "N/A", "N/A", "N/A"
     try:
-        await page.wait_for_function(
-            """(expectedName) => {
-                const panels = document.querySelectorAll('div.m6QErb.XiKgde[role="region"]');
-                for (const panel of panels) {
-                    const label = panel.getAttribute('aria-label') || '';
-                    if (label.includes(expectedName)) return true;
-                }
-                return false;
-            }""",
-            arg=expected_name,
-            timeout=timeout
+        await detail_page.route(
+            "**/*",
+            lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_()
         )
-        return True
+        await detail_page.goto(place_url, timeout=timeout)
+        await detail_page.wait_for_selector('div.m6QErb.XiKgde[role="region"]', timeout=timeout)
+
+        phone = await get_phone_from_sidebar(detail_page)
+
+        web_btn = await detail_page.query_selector('a[data-item-id="authority"]')
+        if web_btn:
+            website = await web_btn.get_attribute('href') or "N/A"
+
+        rev_el = await detail_page.query_selector('div.F7nice span[role="img"]')
+        if rev_el:
+            lbl = await rev_el.get_attribute('aria-label')
+            if lbl:
+                match = re.search(r'([\d,]+)', lbl)
+                if match:
+                    reviews = match.group(1).replace(',', '')
     except Exception:
-        return False
+        pass
+    finally:
+        await detail_page.close()
+
+    return phone, website, reviews
 
 async def scrape_google_maps(search_query, total_results=80):
     async with async_playwright() as p:
@@ -146,35 +158,14 @@ async def scrape_google_maps(search_query, total_results=80):
                         continue
 
                     rating, reviews = await extract_rating_and_reviews(card_handle)
-                    phone = "N/A"
-                    website = "N/A"
 
-                    # نضغط على كل عيادة دائماً، ونأخذ الهاتف والموقع مباشرة من اللوحة
-                    link_to_click = await card_handle.query_selector('a.hfpxzc')
-                    if link_to_click:
-                        await link_to_click.click()
-                        panel_ready = await wait_for_panel_ready(page, name)
-
-                        if panel_ready:
-                            phone = await get_phone_from_sidebar(page)
-
-                            web_btn = await page.query_selector('a[data-item-id="authority"]')
-                            if web_btn:
-                                website = await web_btn.get_attribute('href') or "N/A"
-
-                            if reviews == "N/A":
-                                rev_el = await page.query_selector('div.F7nice span[role="img"]')
-                                if rev_el:
-                                    lbl = await rev_el.get_attribute('aria-label')
-                                    if lbl:
-                                        match = re.search(r'([\d,]+)', lbl)
-                                        if match:
-                                            reviews = match.group(1).replace(',', '')
-
-                        back_btn = page.locator('button[aria-label="Back"], button[aria-label="رجوع"]')
-                        if await back_btn.count() > 0:
-                            await back_btn.first.click()
-                            await page.wait_for_timeout(1500)
+                    # لا نضغط على شيء في صفحة القائمة إطلاقاً، بل نذهب لرابط العيادة في تبويب مستقل
+                    if place_url != "N/A":
+                        phone, website, fallback_reviews = await fetch_details_in_new_tab(context, place_url)
+                        if reviews == "N/A":
+                            reviews = fallback_reviews
+                    else:
+                        phone, website = "N/A", "N/A"
 
                     results.append({
                         "Name": name,
@@ -190,13 +181,6 @@ async def scrape_google_maps(search_query, total_results=80):
 
                 except Exception as e:
                     print(f"[-] Error extracting data for a clinic: {e}")
-                    try:
-                        back_btn = page.locator('button[aria-label="Back"], button[aria-label="رجوع"]')
-                        if await back_btn.count() > 0:
-                            await back_btn.first.click()
-                            await page.wait_for_timeout(1000)
-                    except Exception:
-                        pass
 
                 await card_handle.dispose()
                 current_index += 1
