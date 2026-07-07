@@ -1,0 +1,22 @@
+{
+    "title": "Google Maps Scraper Input",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "search_query": {
+            "title": "Search Query",
+            "type": "string",
+            "description": "e.g., Dental Clinics in Dubai Marina",
+            "editor": "textfield",
+            "prefill": "Dental Clinics in Dubai Marina"
+        },
+        "total_results": {
+            "title": "Total Results",
+            "type": "integer",
+            "description": "Number of results to scrape",
+            "editor": "number",
+            "prefill": 80
+        }
+    },
+    "required": ["search_query"]
+}
