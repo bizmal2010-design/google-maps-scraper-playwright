@@ -87,7 +87,9 @@ async def scrape_google_maps(search_query, total_results=80):
             args=[
                 '--lang=en-US',
                 '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage'
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-gpu'
             ]
         )
         context = await browser.new_context(
@@ -157,54 +159,45 @@ async def scrape_google_maps(search_query, total_results=80):
                         await link_to_click.click()
 
                         # حفظ رقم الهاتف القديم قبل الانتظار
-                        old_phone = phone
+                        panel_ready = False
+                        try:
+                            # الانتظار الصحيح: نتأكد أن اللوحة صارت فعلاً خاصة بهذه العيادة تحديداً
+                            # عن طريق فحص عنوانها، بدل مراقبة تغيّر رقم الهاتف
+                            await page.wait_for_function(
+                                """(expectedName) => {
+                                    const panel = document.querySelector('div[aria-label^="Information for"]');
+                                    return panel && panel.getAttribute('aria-label').includes(expectedName);
+                                }""",
+                                arg=name,
+                                timeout=8000
+                            )
+                            panel_ready = True
+                        except Exception:
+                            panel_ready = False
 
-                        # انتظار حتى يتغير رقم الهاتف في اللوحة الجانبية (محاولة حتى 10 مرات، كل 0.5 ثانية)
-                        for _ in range(10):
-                            current_sidebar_phone = await get_phone_from_sidebar(page)
-                            if current_sidebar_phone != old_phone:
-                                phone = current_sidebar_phone
-                                break
-                            await page.wait_for_timeout(500)
+                        if panel_ready:
+                            if phone == "N/A":
+                                phone = await get_phone_from_sidebar(page)
 
-                        # إذا لم يتغير الهاتف بعد المحاولات، نستخدم انتظار اسم العيادة كبديل
-                        if phone == old_phone:
-                            try:
-                                escaped_name = re.escape(name)
-                                await page.locator('h1.DUwDvf').filter(has_text=re.compile(escaped_name, re.IGNORECASE)).wait_for(state="visible", timeout=6000)
-                                await page.wait_for_timeout(500)
-                            except Exception:
-                                await page.wait_for_timeout(2500)
+                            if website == "N/A":
+                                web_btn = await page.query_selector('a[data-item-id="authority"]')
+                                if web_btn:
+                                    website = await web_btn.get_attribute('href') or "N/A"
 
-                        # كشط المراجعات من اللوحة الجانبية إذا لازالت مفقودة
-                        if reviews == "N/A":
-                            rev_el = await page.query_selector('div.F7nice span[role="img"]')
-                            if rev_el:
-                                lbl = await rev_el.get_attribute('aria-label')
-                                if lbl:
-                                    match = re.search(r'([\d,]+)\s*reviews?', lbl, re.IGNORECASE)
-                                    if match:
-                                        reviews = match.group(1).replace(',', '')
+                            if reviews == "N/A":
+                                rev_el = await page.query_selector('div.F7nice span[role="img"]')
+                                if rev_el:
+                                    lbl = await rev_el.get_attribute('aria-label')
+                                    if lbl:
+                                        match = re.search(r'([\d,]+)\s*reviews?', lbl, re.IGNORECASE)
+                                        if match:
+                                            reviews = match.group(1).replace(',', '')
 
-                        # محاولة أخيرة لقراءة الهاتف من اللوحة الجانبية إن لم يتغير بعد
-                        if phone == "N/A" or phone == old_phone:
-                            phone_btn = await page.query_selector('button[data-item-id^="phone:tel:"]')
-                            if phone_btn:
-                                phone_data = await phone_btn.get_attribute('data-item-id')
-                                if phone_data:
-                                    phone = phone_data.replace('phone:tel:', '')
-
-                        # كشط الموقع من اللوحة الجانبية إن كان مفقودًا
-                        if website == "N/A":
-                            web_btn = await page.query_selector('a[data-item-id="authority"]')
-                            if web_btn:
-                                website = await web_btn.get_attribute('href')
-
-                        # العودة للقائمة
                         back_btn = page.locator('button[aria-label="Back"], button[aria-label="رجوع"]')
                         if await back_btn.count() > 0:
                             await back_btn.first.click()
                             await page.wait_for_timeout(1500)
+
 
                 results.append({
                     "Name": name,
