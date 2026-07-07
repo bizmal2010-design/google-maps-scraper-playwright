@@ -24,21 +24,19 @@ async def extract_rating_and_reviews(card):
     rating = "N/A"
     reviews = "N/A"
     
-    # Method 1: Extract from the aria-label of the wrapper (Most reliable method)
-    # The aria-label usually looks like: "4.9 stars 1,107 Reviews"
+    # Method 1: Try finding the aria-label inside the outer card
     wrapper = await card.query_selector('span[role="img"]')
     if wrapper:
         label = await wrapper.get_attribute('aria-label')
         if label:
-            # Find all numeric values including dots and commas
-            numbers = re.findall(r'[\d,.]+', label)
-            if len(numbers) >= 2:
-                rating = numbers[0]
-                # Clean up commas from the reviews count
-                reviews = numbers[1].replace(',', '').replace('٬', '')
+            # Better Regex to match "4.9 stars 1,107 Reviews"
+            match = re.search(r'([\d.]+)\s*stars?\s*([\d,]+)\s*Reviews?', label, re.IGNORECASE)
+            if match:
+                rating = match.group(1)
+                reviews = match.group(2).replace(',', '')
                 return rating, reviews
-                
-    # Method 2: Fallback to specific spans just in case
+
+    # Method 2: Fallback to specific spans in the outer card
     rating_el = await card.query_selector('span.MW4etd')
     reviews_el = await card.query_selector('span.UY7F9')
     
@@ -48,7 +46,8 @@ async def extract_rating_and_reviews(card):
         
     if reviews_el:
         raw = await reviews_el.inner_text()
-        reviews = raw.replace('(', '').replace(')', '').replace(',', '').replace('٬', '').strip()
+        # Remove all non-numeric characters (brackets, commas, etc.)
+        reviews = re.sub(r'[^\d]', '', raw)
         
     return rating, reviews
 
@@ -77,7 +76,6 @@ async def extract_place_url(card):
 
 async def scrape_google_maps(search_query, total_results=80):
     async with async_playwright() as p:
-        # Force English language to ensure selectors matching
         browser = await p.chromium.launch(
             headless=True,
             args=['--lang=en-US', '--disable-blink-features=AutomationControlled']
@@ -105,7 +103,6 @@ async def scrape_google_maps(search_query, total_results=80):
                 if len(results) >= total_results:
                     break
                 
-                # Re-query elements to prevent StaleElementReference errors
                 current_cards = await page.query_selector_all('div[role="article"]')
                 if i >= len(current_cards):
                     break
@@ -123,28 +120,46 @@ async def scrape_google_maps(search_query, total_results=80):
                     phone = await extract_phone_from_card(card)
                     website = await extract_website_from_card(card)
 
-                    # Smart Condition: If phone or website is missing (thumbnail case)
-                    if phone == "N/A" or website == "N/A":
+                    # Condition to click: missing phone, website, OR reviews
+                    if phone == "N/A" or website == "N/A" or reviews == "N/A":
                         link_to_click = await card.query_selector('a.hfpxzc')
                         if link_to_click:
-                            # Click the clinic card to open the sidebar
                             await link_to_click.click()
-                            await page.wait_for_timeout(3000) # Wait for sidebar to load
                             
-                            # Extract phone from the sidebar
+                            # VITAL FIX: Wait for the sidebar Title to match the current clinic name.
+                            # This prevents scraping the old clinic's data while the new one is loading!
+                            try:
+                                # Escape quotes in name to prevent selector errors
+                                safe_name = name.replace('"', '\\"')
+                                await page.wait_for_selector(f'h1.DUwDvf:has-text("{safe_name}")', timeout=5000)
+                            except Exception:
+                                # Fallback wait if exact name match fails
+                                await page.wait_for_timeout(3000)
+                            
+                            # Extract Reviews from inner sidebar if still missing
+                            if reviews == "N/A":
+                                rev_el = await page.query_selector('div.F7nice span[role="img"]')
+                                if rev_el:
+                                    lbl = await rev_el.get_attribute('aria-label')
+                                    if lbl:
+                                        match = re.search(r'([\d,]+)\s*reviews?', lbl, re.IGNORECASE)
+                                        if match:
+                                            reviews = match.group(1).replace(',', '')
+
+                            # Extract Phone from sidebar
                             if phone == "N/A":
                                 phone_btn = await page.query_selector('button[data-item-id^="phone:tel:"]')
                                 if phone_btn:
                                     phone_data = await phone_btn.get_attribute('data-item-id')
                                     phone = phone_data.replace('phone:tel:', '')
                             
-                            # Extract website from the sidebar
+                            # Extract Website from sidebar
                             if website == "N/A":
                                 web_btn = await page.query_selector('a[data-item-id="authority"]')
                                 if web_btn:
                                     website = await web_btn.get_attribute('href')
 
-                            # Click the 'Back' button to return to the results list
+                            # Go back to the list
                             back_btn = await page.query_selector('button[aria-label="Back"], button[aria-label="رجوع"]')
                             if back_btn:
                                 await back_btn.click()
@@ -159,22 +174,19 @@ async def scrape_google_maps(search_query, total_results=80):
                         "MapURL": place_url
                     })
                     
-                    # Print ALL scraped data to terminal
                     print(f"[+] Extracted: {name} | Phone: {phone} | Rating: {rating} | Reviews: {reviews} | Website: {website} | MapURL: {place_url}")
-                    
                     seen.add(key)
                     new_in_this_round += 1
 
                 except Exception as e:
                     print(f"[-] Error extracting data for a clinic: {e}")
-                    # Safety net: Ensure we go back to the list if an error occurs
                     back_btn = await page.query_selector('button[aria-label="Back"], button[aria-label="رجوع"]')
                     if back_btn:
                         await back_btn.click()
                         await page.wait_for_timeout(1000)
                     continue
 
-            # Scroll down to fetch more clinics
+            # Scroll to load more
             await page.mouse.wheel(0, 2000)
             await page.wait_for_timeout(3000)
 
